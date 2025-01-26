@@ -768,10 +768,3 @@ class NaturalSpeech3(nn.Module):
 
         return overall_loss
 
-    @property
-    def device(self):
-        return next(self.model.parameters()).device
-
-    def print(self, s):
-        return self.accelerator.print(s)
-
