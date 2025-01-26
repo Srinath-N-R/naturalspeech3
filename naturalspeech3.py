@@ -767,3 +767,11 @@ class NaturalSpeech3(nn.Module):
         overall_loss = duration_loss + prosody_loss + zp_loss + zc_loss + zd_loss + speech_loss
 
         return overall_loss
+
+    @property
+    def device(self):
+        return next(self.model.parameters()).device
+
+    def print(self, s):
+        return self.accelerator.print(s)
+
