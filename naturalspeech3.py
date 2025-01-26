@@ -232,11 +232,12 @@ class PhonemeProsodyDurationDiffusion(nn.Module):
     def __init__(
         self,
         input_dim=256,     # dimension of phoneme encoder output
+        output_dim=2,
         embed_dim=1024,
         num_heads=8,
         ff_dim=2048,
         num_layers=6,
-        dropout=0.1
+        dropout=0.1,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -261,10 +262,9 @@ class PhonemeProsodyDurationDiffusion(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # Output: 5 features per phoneme
-        # [avg_pitch, std_pitch, avg_energy, std_energy, duration]
-        self.output_dim = 5
-        self.output_linear = nn.Linear(embed_dim, self.output_dim)
+        # Output: 2 features per phoneme
+        # [duration, prosody]
+        self.output_linear = nn.Linear(embed_dim, output_dim)
 
 
     def forward(self, phoneme_enc, t):
@@ -345,7 +345,6 @@ class LengthRegulator(nn.Module):
         return c_ph
 
 
-
 def partial_mask(target_tokens, t, mask_id=9999):
     """
     Partially mask the target prosody tokens at ratio p = sigma(t).
@@ -387,7 +386,6 @@ def sin_schedule(step):
     fraction = step / T
     p = math.sin(math.pi * fraction / 2)
     return p
-
 
 
 class MultiStreamCrossAttnBlock(nn.Module):
@@ -542,6 +540,85 @@ class MainDiffusionModel(nn.Module):
         return x, logits
 
 
+
+class SpeechDiffusionModel(nn.Module):
+    """
+    12-layer Transformer for prosody diffusion
+    - Cross-attends to c_ph (frame-level phoneme condition) or speaker embeddings
+    - Partial noising on prosody tokens
+    """
+    def __init__(
+        self,
+        output_dim=1,
+        prosody_vocab_size=1025,
+        embed_dim=256,
+        num_heads=8,
+        ff_dim=2048,
+        num_layers=12,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.main_embedding = nn.Linear(prosody_vocab_size, embed_dim)
+        self.time_embed = TimeEmbedding(embed_dim)
+
+        # 12 cross-attention blocks
+        self.layers = nn.ModuleList([
+            MultiStreamCrossAttnBlock(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                ff_dim=ff_dim,
+                conditioning_dim=embed_dim,  # time-embedding dimension
+                dropout=dropout
+            ) for _ in range(num_layers)
+        ])
+        self.output_linear = nn.Linear(embed_dim, output_dim)
+
+
+    def forward(self, x_tokens, cond_1, cond_2, cond_3, cond_4, t, x_mask=None, c1_mask=None, c2_mask=None, c3_mask=None, c4_mask=None):
+        """
+        x_tokens: main stream of prosody tokens [prompt + target]
+        c_ph: (B, N_frames, E) frame-level phoneme embeddings
+        cond_1: (B, 1, E) or (B, E) speaker style
+        t: time step
+        """
+        # Possibly embed t in a separate LN or an additional cross condition
+        # x = self.main_embedding(x_tokens)
+        time_emb = self.time_embed(t)  # (B, E)
+        
+        for layer in self.layers:
+            x = layer(
+                x_tokens,
+                time_emb,
+                cond1=cond_1,
+                cond2=cond_2,
+                cond3=cond_3,
+                cond4=cond_4,
+                x_mask=x_mask,
+                c1_mask=c1_mask,
+                c2_mask=c2_mask,
+                c3_mask=c3_mask,
+                c4_mask=c4_mask,
+            )
+
+        return x
+
+
+def average_prosody(target_prosody, phoneme_cum_durations):
+    num_phonemes = phoneme_cum_durations.shape[-1]
+    _, batch_size, _ = target_prosody.shape
+    averaged_prosody = torch.zeros(batch_size, num_phonemes)
+    for b in range(batch_size):  # Iterate over batch
+        prev_duration = 0
+        for p in range(num_phonemes):  # Iterate over phonemes
+                duration = phoneme_cum_durations[b][p]
+                start_idx = int(prev_duration)
+                end_idx = int(duration)
+                if start_idx < end_idx:
+                    averaged_prosody[b, p] = target_prosody[:, b, start_idx:end_idx].float().mean()
+                prev_duration = duration
+    return averaged_prosody
+
+
 class NaturalSpeech3(nn.Module):
     def __init__(
         self,
@@ -564,7 +641,7 @@ class NaturalSpeech3(nn.Module):
         self.prosody_diffusion = MainDiffusionModel()
         self.content_diffusion = MainDiffusionModel()
         self.acoustic_detail_diffusion = MainDiffusionModel()
-        self.speech_diffusion = MainDiffusionModel()
+        self.speech_diffusion = SpeechDiffusionModel()
 
 
     def forward(
@@ -585,7 +662,6 @@ class NaturalSpeech3(nn.Module):
 
         target_enc_out = self.facodec_encoder(target_audio)
 
-        # Extract latent representations (prosody, content, residual) from target audio
         target_vq_post_emb, target_vq_id, _, target_quantized, target_spk_embs = self.facodec_decoder(
             target_enc_out, eval_vq=True, vq=True
         )
@@ -594,6 +670,9 @@ class NaturalSpeech3(nn.Module):
         target_content = target_vq_id[1:3]
         target_acoustic_detail = target_vq_id[3:]
 
+        phoneme_cum_durations = torch.cumsum(phoneme_durations, dim=1)
+        prosody = average_prosody(target_prosody, phoneme_cum_durations)
+        
         phoneme_enc = self.phoneme_encoder(phoneme_sequence)
 
         b, *_ = prompt_audio.shape
@@ -616,6 +695,11 @@ class NaturalSpeech3(nn.Module):
         acoustic_detail_tokens = torch.cat([partial_mask_acoustic_detail, prompt_acoustic_detail],-1)
         acoustic_detail_tokens = acoustic_detail_tokens.permute(1, 0, 2)
 
+        target_vq_post_emb = target_vq_post_emb.permute(1, 0, 2)
+        prompt_vq_post_emb = prompt_vq_post_emb.permute(1, 0, 2)
+        partial_mask_vq = partial_mask(target_vq_post_emb, t, mask_id=1024)
+        vq_tokens = torch.cat([partial_mask_vq, prompt_vq_post_emb],-1)
+        vq_tokens = vq_tokens.permute(1, 2, 0)
 
         original_prosody_second_dim = prosody_tokens.shape[-2]
         original_content_second_dim = content_tokens.shape[-2]
@@ -623,13 +707,63 @@ class NaturalSpeech3(nn.Module):
 
         prosody_tokens = prosody_tokens.reshape(prosody_tokens.size(0), -1)
         content_tokens = content_tokens.reshape(content_tokens.size(0), -1)
-        acoustic_detail_tokens = acoustic_detail_tokens.reshape(content_tokens.size(0), -1)
+        acoustic_detail_tokens = acoustic_detail_tokens.reshape(acoustic_detail_tokens.size(0), -1)
 
         zp, zp_l = self.prosody_diffusion(prosody_tokens, cond_1=c_ph, cond_2=None, cond_3=None, cond_4=None, t=t)
         zc, zc_l = self.content_diffusion(content_tokens, cond_1=c_ph, cond_2=zp, cond_3=None, cond_4=None,t=t)
         zd, zd_l = self.acoustic_detail_diffusion(acoustic_detail_tokens, cond_1=c_ph, cond_2=zp, cond_3=zc, cond_4=None, t=t)
-        speech, _ = self.speech_diffusion(acoustic_detail_tokens, cond_1=c_ph, cond_2=zp, cond_3=zc, cond_4=zd, t=t)
+        speech = self.speech_diffusion(vq_tokens, cond_1=c_ph, cond_2=zp, cond_3=zc, cond_4=zd, t=t)
         
         zp_l = zp_l.reshape(zc_l.size(0), original_prosody_second_dim, -1)
         zc_l = zc_l.reshape(zc_l.size(0), original_content_second_dim, -1)
         zd_l = zd_l.reshape(zc_l.size(0), original_acoustic_detail_second_dim, -1)
+
+        L_prompt = prompt_prosody.shape[-1]
+
+        zp_l = zp_l.permute(1, 0, 2)
+        zc_l = zc_l.permute(1, 0, 2)
+        zd_l = zd_l.permute(1, 0, 2)
+        speech = speech.permute(2, 0, 1)
+        
+        padded_prosody_target = torch.full(
+            zp_l.shape,
+            fill_value=0,
+            dtype=torch.long,
+            device=zp_l.device
+        )
+        padded_prosody_target[:,:, L_prompt:] = target_prosody
+
+        padded_content_target = torch.full(
+            zc_l.shape,
+            fill_value=0,
+            dtype=torch.long,
+            device=zc_l.device
+        )
+        padded_content_target[:,:, L_prompt:] = target_content
+
+        padded_acoustic_detail_target = torch.full(
+            zd_l.shape,
+            fill_value=0,
+            dtype=torch.long,
+            device=zd_l.device
+        )
+        padded_acoustic_detail_target[:,:, L_prompt:] = target_acoustic_detail
+
+        padded_vq_target = torch.full(
+            speech.shape,
+            fill_value=0,
+            dtype=speech.dtype,
+            device=speech.device
+        )
+        padded_vq_target[:,:, L_prompt:] = target_vq_post_emb
+        
+        duration_loss = F.l1_loss(phoneme_durations, durations_pred)
+        prosody_loss = F.l1_loss(prosody, prosody_pred)
+        zp_loss = F.l1_loss(padded_prosody_target, zp_l)
+        zc_loss = F.l1_loss(padded_content_target, zc_l)
+        zd_loss = F.l1_loss(padded_acoustic_detail_target, zd_l)
+        speech_loss = F.l1_loss(padded_vq_target, speech)
+
+        overall_loss = duration_loss + prosody_loss + zp_loss + zc_loss + zd_loss + speech_loss
+
+        return overall_loss
