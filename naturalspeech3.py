@@ -612,7 +612,7 @@ def average_prosody(target_prosody, phoneme_cum_durations):
         for p in range(num_phonemes):  # Iterate over phonemes
                 duration = phoneme_cum_durations[b][p]
                 start_idx = int(prev_duration)
-                end_idx = int(duration)
+                end_idx = min(int(duration), target_prosody.shape[-1])
                 if start_idx < end_idx:
                     averaged_prosody[b, p] = target_prosody[:, b, start_idx:end_idx].float().mean()
                 prev_duration = duration
@@ -624,7 +624,7 @@ class NaturalSpeech3(nn.Module):
         self,
         facodec_encoder: FACodecEncoder,
         facodec_decoder: FACodecDecoder,
-        vocab_size=512,
+        vocab_size=70,
         T=1000,
     ):
     
@@ -652,7 +652,7 @@ class NaturalSpeech3(nn.Module):
         target_audio: torch.tensor,
     ):        
         prompt_enc_out = self.facodec_encoder(prompt_audio)
-        prompt_vq_post_emb, prompt_vq_id, _, prompt_quantized, prompt_spk_embs = self.facodec_decoder(
+        prompt_vq_post_emb, prompt_vq_id, *_ = self.facodec_decoder(
             prompt_enc_out, eval_vq=True, vq=True
         )
 
@@ -662,7 +662,7 @@ class NaturalSpeech3(nn.Module):
 
         target_enc_out = self.facodec_encoder(target_audio)
 
-        target_vq_post_emb, target_vq_id, _, target_quantized, target_spk_embs = self.facodec_decoder(
+        target_vq_post_emb, target_vq_id, *_ = self.facodec_decoder(
             target_enc_out, eval_vq=True, vq=True
         )
 
