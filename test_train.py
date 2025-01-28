@@ -43,7 +43,6 @@ fa_decoder.eval()
 device = torch.device("cpu")
 
 def main():
-    # Initialize NaturalSpeech2
     diffusion = NaturalSpeech3(
         facodec_encoder=fa_encoder,
         facodec_decoder=fa_decoder,

@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 import logging
 from phonemizer import phonemize
 from phonemizer.separator import Separator
-from naturalspeech2_pytorch.utils.tokenizer import Tokenizer
+from utils.tokenizer import Tokenizer
 import re
 
 logger = logging.getLogger(__name__)
