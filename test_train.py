@@ -4,7 +4,6 @@ from Amphion.models.codec.ns3_codec import FACodecEncoder, FACodecDecoder
 from huggingface_hub import hf_hub_download
 import torch
 from transformers import Trainer, TrainingArguments
-import torch.multiprocessing as mp
 
 
 fa_encoder = FACodecEncoder(
@@ -40,14 +39,30 @@ fa_decoder.load_state_dict(torch.load(decoder_ckpt))
 fa_encoder.eval()
 fa_decoder.eval()
 
+def compute_metrics(eval_pred):
+    predictions, _ = eval_pred
+
+    return {
+        "duration_loss": predictions[0][0], 
+        "prosody_beta_loss": predictions[1][0], 
+        "prosody_loss": predictions[2][0], 
+        "content_loss": predictions[3][0], 
+        "acoustic_loss": predictions[4][0], 
+        "speech_loss": predictions[5][0]
+            }
+
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Convert model weights to bfloat16
+    fa_encoder.to(device, dtype=torch.bfloat16)
+    fa_decoder.to(device, dtype=torch.bfloat16)
+
     diffusion = NaturalSpeech3(
         facodec_encoder=fa_encoder,
         facodec_decoder=fa_decoder,
-    ).to(device)
+    ).to(device, dtype=torch.bfloat16)
 
 
     # Dataset
@@ -60,19 +75,24 @@ def main():
 
 
     training_args = TrainingArguments(
-        output_dir="/workspace/results", 
+        output_dir="/workspace/results",
         evaluation_strategy="steps",
         eval_steps=100,
         logging_dir="/workspace/logs",
         logging_steps=10,
         num_train_epochs=3,
-        per_device_train_batch_size=2,
-        per_device_eval_batch_size=2,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=4,
         save_steps=500,
-        save_total_limit=2,
-        fp16=True,
-        dataloader_num_workers=1,
-        deepspeed="/workspace/codebase/naturalspeech3/dp_config.json"
+        save_total_limit=1,
+        bf16=True,  # Ensure bf16 is explicitly set
+        fp16=False,  # Disable fp16
+        gradient_accumulation_steps=1,  # Prevent multiple gradient computations
+        dataloader_num_workers=8,
+        optim="adamw_torch",  # Avoid 8-bit optimizer when using DeepSpeed ZeRO
+        deepspeed="/workspace/codebase/naturalspeech3/dp_config.json",
+        report_to="wandb",
+        run_name="natspeech3_test_0"
     )
 
 
@@ -82,7 +102,8 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        data_collator=custom_collate_fn
+        data_collator=custom_collate_fn,
+        compute_metrics=compute_metrics,
     )
     # Train
     trainer.train()

@@ -2,6 +2,8 @@ import math
 import torch
 from torch import nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as cp
+
 from Amphion.models.codec.ns3_codec import FACodecEncoder, FACodecDecoder
 
 
@@ -194,7 +196,7 @@ class TimeEmbedding(nn.Module):
     """
     Simple sinusoidal or learnable embedding for diffusion time steps.
     """
-    def __init__(self, embed_dim, dtype=torch.float16):
+    def __init__(self, embed_dim, dtype=torch.bfloat16):
         super().__init__()
         self.embed_dim = embed_dim
         self.dtype = dtype
@@ -245,7 +247,7 @@ class PhonemeProsodyDurationDiffusion(nn.Module):
         self.input_dim = input_dim
         self.embed_dim = embed_dim
 
-        self.input_linear = nn.Linear(input_dim, embed_dim).to(dtype=torch.float16)
+        self.input_linear = nn.Linear(input_dim, embed_dim).to(dtype=torch.bfloat16)
 
         # Time embedding for conditional LN
         self.time_embed = TimeEmbedding(embed_dim)
@@ -580,18 +582,21 @@ class MainDiffusionModel(nn.Module):
         time_emb = self.time_embed(t)  # (B, E)
         
         for layer in self.layers:
-            x = layer(
+            def layer_forward(*inputs):
+                return layer(*inputs)
+            x = cp.checkpoint(
+                layer_forward, 
                 x,
                 time_emb,
-                cond1=cond_1,
-                cond2=cond_2,
-                cond3=cond_3,
-                cond4=cond_4,
-                x_mask=x_mask,
-                c1_mask=c1_mask,
-                c2_mask=c2_mask,
-                c3_mask=c3_mask,
-                c4_mask=c4_mask,
+                cond_1,
+                cond_2,
+                cond_3,
+                cond_4,
+                x_mask,
+                c1_mask,
+                c2_mask,
+                c3_mask,
+                c4_mask,
             )
 
         # final output
@@ -645,18 +650,21 @@ class SpeechDiffusionModel(nn.Module):
         time_emb = self.time_embed(t)  # (B, E)
         
         for layer in self.layers:
-            x = layer(
+            def layer_forward(*inputs):
+                return layer(*inputs)
+            x = cp.checkpoint(
+                layer_forward, 
                 x_tokens,
                 time_emb,
-                cond1=cond_1,
-                cond2=cond_2,
-                cond3=cond_3,
-                cond4=cond_4,
-                x_mask=x_mask,
-                c1_mask=c1_mask,
-                c2_mask=c2_mask,
-                c3_mask=c3_mask,
-                c4_mask=c4_mask,
+                cond_1,
+                cond_2,
+                cond_3,
+                cond_4,
+                x_mask,
+                c1_mask,
+                c2_mask,
+                c3_mask,
+                c4_mask,
             )
 
         return x
@@ -693,7 +701,7 @@ class NaturalSpeech3(nn.Module):
         self.facodec_decoder = facodec_decoder
 
         self.phoneme_encoder = PhonemeEncoder(vocab_size=vocab_size)
-        self.duration_prosody_predictor = PhonemeProsodyDurationDiffusion().to(dtype=torch.float16)
+        self.duration_prosody_predictor = PhonemeProsodyDurationDiffusion().to(dtype=torch.bfloat16)
 
         self.length_regulator = LengthRegulator()
 
@@ -709,8 +717,8 @@ class NaturalSpeech3(nn.Module):
         phoneme_durations: list[float],
         prompt_audio: torch.tensor,
         target_audio: torch.tensor,
-    ):        
-        prompt_enc_out = self.facodec_encoder(prompt_audio)
+    ):
+        prompt_enc_out = self.facodec_encoder(prompt_audio.to(dtype=torch.bfloat16))
         prompt_vq_post_emb, prompt_vq_id, *_ = self.facodec_decoder(
             prompt_enc_out, eval_vq=True, vq=True
         )
@@ -719,7 +727,7 @@ class NaturalSpeech3(nn.Module):
         prompt_content = prompt_vq_id[1:3]
         prompt_acoustic_detail = prompt_vq_id[3:]
 
-        target_enc_out = self.facodec_encoder(target_audio)
+        target_enc_out = self.facodec_encoder(target_audio.to(dtype=torch.bfloat16))
 
         target_vq_post_emb, target_vq_id, *_ = self.facodec_decoder(
             target_enc_out, eval_vq=True, vq=True
@@ -769,9 +777,9 @@ class NaturalSpeech3(nn.Module):
         acoustic_detail_tokens = acoustic_detail_tokens.reshape(acoustic_detail_tokens.size(0), -1)
 
         zp, zp_l = self.prosody_diffusion(prosody_tokens, cond_1=c_ph, cond_2=None, cond_3=None, cond_4=None, t=t)
-        zc, zc_l = self.content_diffusion(content_tokens, cond_1=c_ph, cond_2=zp, cond_3=None, cond_4=None,t=t)
-        zd, zd_l = self.acoustic_detail_diffusion(acoustic_detail_tokens, cond_1=c_ph, cond_2=zp, cond_3=zc, cond_4=None, t=t)
-        speech = self.speech_diffusion(vq_tokens, cond_1=c_ph, cond_2=zp, cond_3=zc, cond_4=zd, t=t)
+        zc, zc_l = self.content_diffusion(content_tokens, cond_1=torch.cat([c_ph, zp], dim=1), cond_2=None, cond_3=None, cond_4=None,t=t)
+        zd, zd_l = self.acoustic_detail_diffusion(acoustic_detail_tokens, cond_1=torch.cat([c_ph, zp, zc], dim=1), cond_2=None, cond_3=None, cond_4=None, t=t)
+        speech = self.speech_diffusion(vq_tokens, cond_1=torch.cat([c_ph, zp, zc, zd], dim=1), cond_2=None, cond_3=None, cond_4=None, t=t)
         
         zp_l = zp_l.reshape(zc_l.size(0), original_prosody_second_dim, -1)
         zc_l = zc_l.reshape(zc_l.size(0), original_content_second_dim, -1)
@@ -825,5 +833,5 @@ class NaturalSpeech3(nn.Module):
 
         overall_loss = duration_loss + prosody_loss + zp_loss + zc_loss + zd_loss + speech_loss
 
-        return {"loss": overall_loss}
+        return {"loss": overall_loss, "duration_loss": duration_loss, "prosody_beta_loss": prosody_loss, "prosody_loss": zp_loss, "content_loss": zp_loss, "acoustic_loss": zd_loss, "speech_loss": speech_loss}
 
