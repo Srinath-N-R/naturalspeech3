@@ -2,6 +2,7 @@ import re
 import inflect
 from num2words import num2words
 from num_to_words import num_to_word
+
 class NumberNormalizer:
     def __init__(self):
         self._inflect = inflect.engine()

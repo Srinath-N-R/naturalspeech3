@@ -57,7 +57,7 @@ class TransformerBlock(nn.Module):
     """
     def __init__(self, embed_dim, num_heads, ff_dim, kernel_size=9, dropout=0.1):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.self_attn = MemoryEfficientMHA(embed_dim, num_heads, dropout=dropout, batch_first=True)
         self.layernorm1 = nn.LayerNorm(embed_dim)
         self.layernorm2 = nn.LayerNorm(embed_dim)
 
@@ -66,7 +66,7 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x, mask=None):
         # Self-attention
-        attn_out, _ = self.self_attn(x, x, x, attn_mask=mask, need_weights=False)
+        attn_out, _ = self.self_attn(x, mask=mask)
         x = x + self.dropout(attn_out)
         x = self.layernorm1(x)
 
@@ -170,7 +170,7 @@ class ConditionalTransformerBlock(nn.Module):
     """
     def __init__(self, embed_dim, num_heads, ff_dim, conditioning_dim, kernel_size=3, dropout=0.1):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.self_attn = MemoryEfficientMHA(embed_dim, num_heads, dropout=dropout, batch_first=True)
         self.cond_ln1 = ConditionalLayerNorm(embed_dim, conditioning_dim)
         self.cond_ln2 = ConditionalLayerNorm(embed_dim, conditioning_dim)
 
@@ -179,7 +179,7 @@ class ConditionalTransformerBlock(nn.Module):
 
     def forward(self, x, cond, mask=None):
         # Self-attention
-        attn_out, _ = self.self_attn(x, x, x, attn_mask=mask, need_weights=False)
+        attn_out, _ = self.self_attn(x, mask=mask)
         x = x + self.dropout(attn_out)
         x = self.cond_ln1(x, cond)  # conditional layer norm
 
@@ -194,15 +194,17 @@ class TimeEmbedding(nn.Module):
     """
     Simple sinusoidal or learnable embedding for diffusion time steps.
     """
-    def __init__(self, embed_dim):
+    def __init__(self, embed_dim, dtype=torch.float16):
         super().__init__()
         self.embed_dim = embed_dim
-        self.linear1 = nn.Linear(embed_dim, embed_dim)
-        self.linear2 = nn.Linear(embed_dim, embed_dim)
+        self.dtype = dtype
+        self.linear1 = nn.Linear(embed_dim, embed_dim, dtype=dtype)
+        self.linear2 = nn.Linear(embed_dim, embed_dim, dtype=dtype)
 
     def forward(self, t):
         # t is (B,) or (B, 1), a float representing the normalized diffusion time
         # Convert t to shape (B, embed_dim)
+        t = t.to(self.dtype)
         half_dim = self.embed_dim // 2
         # Example: sinusoidal time embedding
         emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
@@ -211,7 +213,7 @@ class TimeEmbedding(nn.Module):
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)  # (B, embed_dim)
         
         # Optionally pass it through MLP
-        emb = self.linear1(emb)
+        emb = self.linear1(emb.to(self.dtype))
         emb = F.silu(emb)
         emb = self.linear2(emb)
         return emb
@@ -243,8 +245,7 @@ class PhonemeProsodyDurationDiffusion(nn.Module):
         self.input_dim = input_dim
         self.embed_dim = embed_dim
 
-        # Project phoneme encoder output (e.g. 512) -> 1024
-        self.input_linear = nn.Linear(input_dim, embed_dim)
+        self.input_linear = nn.Linear(input_dim, embed_dim).to(dtype=torch.float16)
 
         # Time embedding for conditional LN
         self.time_embed = TimeEmbedding(embed_dim)
@@ -314,7 +315,7 @@ class LengthRegulator(nn.Module):
                  is replicated according to its duration. Sequences are padded
                  to the max sequence length in the batch.
         """
-        B, S, E = phoneme_enc.shape
+        B, _, E = phoneme_enc.shape
         expanded_list = []
 
         for b in range(B):
@@ -322,7 +323,7 @@ class LengthRegulator(nn.Module):
             dur_b = durations[b]       # (S,)
 
             frames_b = []
-            for s in range(S):
+            for s in range(len(dur_b)):
                 repeat_len = dur_b[s].item()
                 if repeat_len > 0:
                     # replicate phoneme 's' repeat_len times
@@ -340,7 +341,6 @@ class LengthRegulator(nn.Module):
 
         # Now we pad each sample to the same length
         c_ph = nn.utils.rnn.pad_sequence(expanded_list, batch_first=True, padding_value=0.0)
-        # c_ph: (B, N_max, E)
 
         return c_ph
 
@@ -388,6 +388,62 @@ def sin_schedule(step):
     return p
 
 
+class MemoryEfficientMHA(nn.Module):
+    def __init__(self, embed_dim, num_heads, dropout=0.0, batch_first=True):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        # Projection layers for Q, K, V
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.o_proj = nn.Linear(embed_dim, embed_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.batch_first = batch_first
+
+    def forward(self, x, y=None, mask=None):
+        """
+        x: (B, S, E) or (S, B, E)
+        y: optional cross-attention source, if None, do self-attn
+        mask: optional attention mask
+        """
+        if self.batch_first:
+            B, S, E = x.shape
+        else:
+            S, B, E = x.shape
+
+        if y is None:
+            # self-attn
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+        else:
+            # cross-attn: queries come from x, keys and values from y
+            q = self.q_proj(x)
+            k = self.k_proj(y)
+            v = self.v_proj(y)
+
+        # reshape [B, S, num_heads, head_dim], or do batch_first => [B * num_heads, S, head_dim]
+        q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)  # (B, num_heads, S, head_dim)
+        k = k.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # scaled dot product attention (PyTorch 2.0)
+        # For memory-efficient mode, set 'is_causal=False' or so. 
+        # 'attn_mask=mask' if needed, shape => [B, num_heads, S, S]
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
+        # out shape: (B, num_heads, S, head_dim)
+
+        # merge heads
+        out = out.transpose(1, 2).contiguous()  # (B, S, num_heads, head_dim)
+        out = out.view(B, S, self.embed_dim)    # (B, S, E)
+
+        # final linear
+        out = self.o_proj(out)
+        return out, None
+
+
 class MultiStreamCrossAttnBlock(nn.Module):
     def __init__(self, embed_dim, num_heads, ff_dim, conditioning_dim, dropout=0.1):
         """
@@ -399,11 +455,13 @@ class MultiStreamCrossAttnBlock(nn.Module):
             dropout: dropout rate
         """
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
-        self.cross_attn1 = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
-        self.cross_attn2 = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
-        self.cross_attn3 = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
-        self.cross_attn4 = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.self_attn = MemoryEfficientMHA(embed_dim, num_heads, dropout=dropout, batch_first=True)
+
+        self.cross_attn1 = MemoryEfficientMHA(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.cross_attn2 = MemoryEfficientMHA(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.cross_attn3 = MemoryEfficientMHA(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.cross_attn4 = MemoryEfficientMHA(embed_dim, num_heads, dropout=dropout, batch_first=True)
+
 
         # Conditional LN after each step (self-attn, cross1, cross2, cross3, cross4, feed-forward)
         self.cond_ln1 = ConditionalLayerNorm(embed_dim, conditioning_dim=conditioning_dim)
@@ -440,31 +498,32 @@ class MultiStreamCrossAttnBlock(nn.Module):
           6. Feed-forward + LN
         """
         # 1) Self-attention on x
-        sa_out, _ = self.self_attn(x, x, x, attn_mask=x_mask)
+        sa_out, _ = self.self_attn(x, mask=x_mask)
+
         x = x + sa_out
         x = self.cond_ln1(x, time_emb)
 
         # 2) Cross-attn on cond1
         if cond1 is not None:
-            ca1_out, _ = self.cross_attn1(x, cond1, cond1, attn_mask=c1_mask)
+            ca1_out, _ = self.cross_attn1(x, cond1, mask=c1_mask)
             x = x + ca1_out
             x = self.cond_ln2(x, time_emb)
 
         # 3) Cross-attn on cond2
         if cond2 is not None:
-            ca2_out, _ = self.cross_attn2(x, cond2, cond2, attn_mask=c2_mask)
+            ca2_out, _ = self.cross_attn2(x, cond2, mask=c2_mask)
             x = x + ca2_out
             x = self.cond_ln3(x, time_emb)
 
         # 4) Cross-attn on cond3
         if cond3 is not None:
-            ca3_out, _ = self.cross_attn3(x, cond3, cond3, attn_mask=c3_mask)
+            ca3_out, _ = self.cross_attn3(x, cond3, mask=c3_mask)
             x = x + ca3_out
             x = self.cond_ln4(x, time_emb)
 
         # 5) Cross-attn on cond4
         if cond4 is not None:
-            ca4_out, _ = self.cross_attn4(x, cond4, cond4, attn_mask=c4_mask)
+            ca4_out, _ = self.cross_attn4(x, cond4, mask=c4_mask)
             x = x + ca4_out
             x = self.cond_ln5(x, time_emb)
 
@@ -634,7 +693,7 @@ class NaturalSpeech3(nn.Module):
         self.facodec_decoder = facodec_decoder
 
         self.phoneme_encoder = PhonemeEncoder(vocab_size=vocab_size)
-        self.duration_prosody_predictor = PhonemeProsodyDurationDiffusion()
+        self.duration_prosody_predictor = PhonemeProsodyDurationDiffusion().to(dtype=torch.float16)
 
         self.length_regulator = LengthRegulator()
 
@@ -671,12 +730,12 @@ class NaturalSpeech3(nn.Module):
         target_acoustic_detail = target_vq_id[3:]
 
         phoneme_cum_durations = torch.cumsum(phoneme_durations, dim=1)
-        prosody = average_prosody(target_prosody, phoneme_cum_durations)
+        prosody = average_prosody(target_prosody, phoneme_cum_durations).to(target_prosody.device)
         
         phoneme_enc = self.phoneme_encoder(phoneme_sequence)
 
         b, *_ = prompt_audio.shape
-        t = torch.randint(low=0, high=self.T, size=(b,), dtype=torch.long)
+        t = torch.randint(low=0, high=self.T, size=(b,), dtype=torch.long).to(target_prosody.device)
         phoneme_prosody_duration = self.duration_prosody_predictor(phoneme_enc, t)
 
         durations_pred, prosody_pred = phoneme_prosody_duration[:,:,0], phoneme_prosody_duration[:,:,1:]
@@ -758,7 +817,7 @@ class NaturalSpeech3(nn.Module):
         padded_vq_target[:,:, L_prompt:] = target_vq_post_emb
         
         duration_loss = F.l1_loss(phoneme_durations, durations_pred)
-        prosody_loss = F.l1_loss(prosody, prosody_pred)
+        prosody_loss = F.l1_loss(prosody, prosody_pred.squeeze(-1))
         zp_loss = F.l1_loss(padded_prosody_target, zp_l)
         zc_loss = F.l1_loss(padded_content_target, zc_l)
         zd_loss = F.l1_loss(padded_acoustic_detail_target, zd_l)
@@ -766,5 +825,5 @@ class NaturalSpeech3(nn.Module):
 
         overall_loss = duration_loss + prosody_loss + zp_loss + zc_loss + zd_loss + speech_loss
 
-        return overall_loss
+        return {"loss": overall_loss}
 

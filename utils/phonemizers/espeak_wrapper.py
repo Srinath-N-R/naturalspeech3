@@ -6,8 +6,8 @@ from typing import Dict, List
 
 from packaging.version import Version
 
-from base import BasePhonemizer
-from punctuation import Punctuation
+from utils.phonemizers.base import BasePhonemizer
+from utils.phonemizers.punctuation import Punctuation
 
 
 

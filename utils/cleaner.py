@@ -1,8 +1,8 @@
 import re
 from pathlib import Path
-from naturalspeech2_pytorch.utils.expand.abbreviations import AbbreviationExpander
-from naturalspeech2_pytorch.utils.expand.number_norm import NumberNormalizer
-from naturalspeech2_pytorch.utils.expand.time_norm import TimeExpander
+from utils.expand.abbreviations import AbbreviationExpander
+from utils.expand.number_norm import NumberNormalizer
+from utils.expand.time_norm import TimeExpander
 
 CURRENT_DIR = Path(__file__).resolve().parent
 

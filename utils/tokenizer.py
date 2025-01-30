@@ -4,8 +4,8 @@ from typing import Callable, List, Optional, Tuple
 
 from torch.nn.utils.rnn import pad_sequence
 
-from cleaner import TextProcessor
-from phonemizers.espeak_wrapper import ESpeak
+from utils.cleaner import TextProcessor
+from utils.phonemizers.espeak_wrapper import ESpeak
 
 
 char_to_id = {'': 0, '[PAD]': 69, '[UNK]': 68, 'aɪ': 2, 'aɪə': 3, 'aɪɚ': 4, 'aʊ': 5, 'b': 6, 'd': 7, 'dt': 8, 'dʒ': 9, 'eɪ': 10, 'f': 11, 'h': 12, 'h#': 13, 'i': 14, 'iə': 15, 'iː': 16, 'j': 17, 'k': 18, 'l': 19, 'm': 20, 'n': 21, 'n̩': 22, 'oʊ': 23, 'p': 24, 'r': 25, 's': 26, 't': 27, 'tʃ': 28, 'uː': 29, 'v': 30, 'w': 31, 'x': 32, 'z': 33, '|': 1, 'æ': 34, 'ç': 35, 'ð': 36, 'ŋ': 37, 'ɐ': 38, 'ɑː': 39, 'ɑːɹ': 40, 'ɑ̃': 41, 'ɔ': 42, 'ɔɪ': 43, 'ɔː': 44, 'ɔːɹ': 45, 'ɔ̃': 46, 'ə': 47, 'əl': 48, 'ɚ': 49, 'ɛ': 50, 'ɛɹ': 51, 'ɜː': 52, 'ɡ': 53, 'ɡʲ': 54, 'ɪ': 55, 'ɪɹ': 56, 'ɬ': 57, 'ɹ': 58, 'ɾ': 59, 'ʃ': 60, 'ʊ': 61, 'ʊɹ': 62, 'ʌ': 63, 'ʒ': 64, 'ʔ': 65, 'θ': 66, 'ᵻ': 67}

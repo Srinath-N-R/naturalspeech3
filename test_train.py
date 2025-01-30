@@ -4,7 +4,7 @@ from Amphion.models.codec.ns3_codec import FACodecEncoder, FACodecDecoder
 from huggingface_hub import hf_hub_download
 import torch
 from transformers import Trainer, TrainingArguments
-
+import torch.multiprocessing as mp
 
 
 fa_encoder = FACodecEncoder(
@@ -40,41 +40,41 @@ fa_decoder.load_state_dict(torch.load(decoder_ckpt))
 fa_encoder.eval()
 fa_decoder.eval()
 
-device = torch.device("cpu")
 
 def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     diffusion = NaturalSpeech3(
         facodec_encoder=fa_encoder,
         facodec_decoder=fa_decoder,
-    )
+    ).to(device)
 
-    diffusion = diffusion.to(device)
 
     # Dataset
-    train_dataset_folder = "/Users/srinathramalingam/Downloads/dataset_new/VCTK_val/"
-    train_dataset = CustomDataset(dataset_folder=train_dataset_folder, max_items=10)
+    train_dataset_folder = "/workspace/datasets/LibriTTS_R-360-Train-new/"
+    train_dataset = CustomDataset(dataset_folder=train_dataset_folder, max_items=32)
 
 
-    val_dataset_folder = "/Users/srinathramalingam/Downloads/dataset_new/VCTK_val/"
-    val_dataset = CustomDataset(dataset_folder=val_dataset_folder, max_items=5)
+    val_dataset_folder = "/workspace/datasets/VCTK_val/"
+    val_dataset = CustomDataset(dataset_folder=val_dataset_folder, max_items=16)
 
 
-    # Training Arguments (CPU enforced)
     training_args = TrainingArguments(
-        output_dir="./results",       # Directory to save checkpoints
-        evaluation_strategy="steps", # Evaluation strategy
-        eval_steps=100,              # Evaluate every 100 steps
-        logging_dir="./logs",        # Log directory
+        output_dir="/workspace/results", 
+        evaluation_strategy="steps",
+        eval_steps=100,
+        logging_dir="/workspace/logs",
         logging_steps=10,
-        num_train_epochs=3,          # Number of epochs
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=4,
-        save_steps=500,              # Save checkpoints every 500 steps
-        save_total_limit=2,          # Keep only the last 2 checkpoints
-        no_cuda=True,                # Enforce CPU usage
-        per_gpu_train_batch_size=2,
+        num_train_epochs=3,
+        per_device_train_batch_size=2,
+        per_device_eval_batch_size=2,
+        save_steps=500,
+        save_total_limit=2,
+        fp16=True,
         dataloader_num_workers=1,
+        deepspeed="/workspace/codebase/naturalspeech3/dp_config.json"
     )
+
 
     # Trainer
     trainer = Trainer(
@@ -86,7 +86,6 @@ def main():
     )
     # Train
     trainer.train()
-
 
 if __name__ == '__main__':
     main()

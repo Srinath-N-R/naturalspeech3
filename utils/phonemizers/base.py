@@ -2,7 +2,7 @@
 import abc
 from typing import List, Tuple
 
-from punctuation import Punctuation
+from utils.phonemizers.punctuation import Punctuation
 
 
 class BasePhonemizer(abc.ABC):

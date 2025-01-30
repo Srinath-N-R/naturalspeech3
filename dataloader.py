@@ -46,28 +46,10 @@ def clean_text(text):
 
 tokenizer = Tokenizer(phonemizer=PhonemizeText(), text_cleaner=clean_text)
 
-# def custom_collate_fn(batch):
-#     target_audio = [torch.tensor(item['target_audio']) for item in batch]
-#     prompt_audio = [torch.tensor(item['prompt_audio']) for item in batch]
-#     phoneme_sequence = tokenizer.phoneme_to_tensor_ids([item['phoneme_sequence'].split() for item in batch], padding_value=69)
-#     phoneme_durations = [torch.tensor([np.ceil(it["duration"] * (1000/12.5)) for it in item['phoneme_durations'].values()] + [0]) for item in batch]
-
-#     target_audio = pad_sequence(target_audio, batch_first=True).unsqueeze(1)
-#     prompt_audio = pad_sequence(prompt_audio, batch_first=True)
-#     phoneme_sequence = pad_sequence(phoneme_sequence, batch_first=True)
-#     phoneme_durations = pad_sequence(phoneme_durations, batch_first=True)
-
-#     return {
-#         'target_audio': target_audio,
-#         'prompt_audio': prompt_audio,
-#         'phoneme_sequence': phoneme_sequence,
-#         'phoneme_durations': phoneme_durations,
-#     }
-
 
 def custom_collate_fn(batch):
-    target_audio = [torch.tensor(item['target_audio'], dtype=torch.float32) for item in batch]
-    prompt_audio = [torch.tensor(item['prompt_audio'], dtype=torch.float32) for item in batch]
+    target_audio = [torch.tensor(item['target_audio'], dtype=torch.float16) for item in batch]
+    prompt_audio = [torch.tensor(item['prompt_audio'], dtype=torch.float16) for item in batch]
 
     # The rest is unchanged:
     phoneme_sequence = tokenizer.phoneme_to_tensor_ids(
@@ -76,12 +58,8 @@ def custom_collate_fn(batch):
     )
 
     phoneme_durations = [
-        torch.tensor(
-            [np.ceil(it["duration"] * (1000 / 12.5)) for it in item['phoneme_durations'].values()] + [0],
-            dtype=torch.float32
-        )
-        for item in batch
-    ]
+        torch.tensor([np.ceil(it[1]["duration_sec"]  * (1000 / 12.5)) for it in list(item['phoneme_durations'].values())] + [0]) for item in batch
+        ]
 
     target_audio = pad_sequence(target_audio, batch_first=True).unsqueeze(1)   # [B, 1, T]
     prompt_audio = pad_sequence(prompt_audio, batch_first=True).unsqueeze(1)   # [B, 1, T]
@@ -185,7 +163,7 @@ class CustomDataset(Dataset):
                 frames = audio.shape[-1]
                 if total_frames + frames > max_duration * sampling_rate:
                     remaining_frames = max_duration * sampling_rate - total_frames
-                    accumulated_audio.append(torch.tensor(audio[:, :remaining_frames]))
+                    accumulated_audio.append(torch.tensor(audio[:remaining_frames]))
                     total_frames += remaining_frames
                     break
                 else:
@@ -196,11 +174,7 @@ class CustomDataset(Dataset):
                 logger.warning(f"Error loading prompt audio {audio_path}: {e}")
                 continue
 
-        # Combine all accumulated audio
-        if accumulated_audio:
-            accumulated_audio = torch.cat(accumulated_audio, dim=-1)
-        else:
-            accumulated_audio = torch.zeros(1, 0)
+        accumulated_audio = torch.cat(accumulated_audio, dim=-1)
 
         # Pad to 30 seconds if necessary
         if accumulated_audio.shape[0] < max_duration * sampling_rate:
