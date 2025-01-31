@@ -89,7 +89,7 @@ def main():
         output_dir="/workspace/results",
         logging_dir="/workspace/logs",
         evaluation_strategy="steps",
-        gradient_accumulation_steps=1,
+        gradient_accumulation_steps=8,
         gradient_checkpointing=False,
         bf16=True,
         fp16=False,
