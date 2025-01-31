@@ -328,10 +328,8 @@ class LengthRegulator(nn.Module):
             for s in range(len(dur_b)):
                 repeat_len = dur_b[s].item()
                 if repeat_len > 0:
-                    # replicate phoneme 's' repeat_len times
                     repeated = ph_enc_b[s].unsqueeze(0).repeat(int(repeat_len), 1)  # (repeat_len, E)
                     frames_b.append(repeated)
-                # If repeat_len=0, we skip that phoneme (rare, but can happen).
 
             if len(frames_b) > 0:
                 frames_b = torch.cat(frames_b, dim=0)  # (N_frames_b, E)
@@ -717,6 +715,7 @@ class NaturalSpeech3(nn.Module):
         phoneme_durations: list[float],
         prompt_audio: torch.tensor,
         target_audio: torch.tensor,
+        return_loss: bool =True,
     ):
         prompt_enc_out = self.facodec_encoder(prompt_audio.to(dtype=torch.bfloat16))
         prompt_vq_post_emb, prompt_vq_id, *_ = self.facodec_decoder(
@@ -736,9 +735,6 @@ class NaturalSpeech3(nn.Module):
         target_prosody = target_vq_id[:1]
         target_content = target_vq_id[1:3]
         target_acoustic_detail = target_vq_id[3:]
-
-        phoneme_cum_durations = torch.cumsum(phoneme_durations, dim=1)
-        prosody = average_prosody(target_prosody, phoneme_cum_durations).to(target_prosody.device)
         
         phoneme_enc = self.phoneme_encoder(phoneme_sequence)
 
@@ -823,6 +819,9 @@ class NaturalSpeech3(nn.Module):
             device=speech.device
         )
         padded_vq_target[:,:, L_prompt:] = target_vq_post_emb
+
+        phoneme_cum_durations = torch.cumsum(phoneme_durations, dim=1)
+        prosody = average_prosody(target_prosody, phoneme_cum_durations).to(target_prosody.device)
         
         duration_loss = F.l1_loss(phoneme_durations, durations_pred)
         prosody_loss = F.l1_loss(prosody, prosody_pred.squeeze(-1))

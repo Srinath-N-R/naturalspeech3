@@ -39,17 +39,28 @@ fa_decoder.load_state_dict(torch.load(decoder_ckpt))
 fa_encoder.eval()
 fa_decoder.eval()
 
-def compute_metrics(eval_pred):
+def compute_metrics(eval_pred, compute_result=True):
+    print("DEBUG: compute_metrics function called!")  # Debugging log
+    
+    if eval_pred is None:
+        print("Warning: eval_pred is None")
+        return {}
+
     predictions, _ = eval_pred
 
-    return {
-        "duration_loss": predictions[0][0], 
-        "prosody_beta_loss": predictions[1][0], 
-        "prosody_loss": predictions[2][0], 
-        "content_loss": predictions[3][0], 
-        "acoustic_loss": predictions[4][0], 
-        "speech_loss": predictions[5][0]
-            }
+    metrics = {
+        "duration_loss": predictions[0].mean(),
+        "prosody_beta_loss": predictions[1].mean(),
+        "prosody_loss": predictions[2].mean(),
+        "content_loss": predictions[3].mean(),
+        "acoustic_loss": predictions[4].mean(),
+        "speech_loss": predictions[5].mean()
+    }
+
+    if compute_result:
+        return metrics
+    else:
+        return {}
 
 
 def main():
@@ -67,44 +78,48 @@ def main():
 
     # Dataset
     train_dataset_folder = "/workspace/datasets/LibriTTS_R-360-Train-new/"
-    train_dataset = CustomDataset(dataset_folder=train_dataset_folder, max_items=32)
+    train_dataset = CustomDataset(dataset_folder=train_dataset_folder)
 
 
     val_dataset_folder = "/workspace/datasets/VCTK_val/"
-    val_dataset = CustomDataset(dataset_folder=val_dataset_folder, max_items=16)
+    val_dataset = CustomDataset(dataset_folder=val_dataset_folder)
 
 
     training_args = TrainingArguments(
         output_dir="/workspace/results",
-        evaluation_strategy="steps",
-        eval_steps=100,
         logging_dir="/workspace/logs",
-        logging_steps=10,
-        num_train_epochs=3,
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=4,
+        evaluation_strategy="steps",
+        gradient_accumulation_steps=1,
+        gradient_checkpointing=False,
+        bf16=True,
+        fp16=False,
+        num_train_epochs=100,
         save_steps=500,
-        save_total_limit=1,
-        bf16=True,  # Ensure bf16 is explicitly set
-        fp16=False,  # Disable fp16
-        gradient_accumulation_steps=1,  # Prevent multiple gradient computations
+        eval_steps=1000,
         dataloader_num_workers=8,
-        optim="adamw_torch",  # Avoid 8-bit optimizer when using DeepSpeed ZeRO
+        logging_steps=100,
+        learning_rate=float(3e-5),
+        warmup_steps=500,
+        save_total_limit=3,
+        optim="adamw_torch",
         deepspeed="/workspace/codebase/naturalspeech3/dp_config.json",
+        lr_scheduler_type="cosine",
+        auto_find_batch_size=True,
+        batch_eval_metrics=True,
         report_to="wandb",
-        run_name="natspeech3_test_0"
+        run_name="natspeech3_test_15",
     )
 
-
-    # Trainer
+    # Initialize Trainer
     trainer = Trainer(
         model=diffusion,
+        data_collator=custom_collate_fn,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        data_collator=custom_collate_fn,
         compute_metrics=compute_metrics,
     )
+
     # Train
     trainer.train()
 

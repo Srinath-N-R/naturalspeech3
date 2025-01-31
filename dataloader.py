@@ -47,34 +47,6 @@ def clean_text(text):
 tokenizer = Tokenizer(phonemizer=PhonemizeText(), text_cleaner=clean_text)
 
 
-# def custom_collate_fn(batch):
-#     target_audio = [torch.tensor(item['target_audio'], dtype=torch.float16) for item in batch]
-#     prompt_audio = [torch.tensor(item['prompt_audio'], dtype=torch.float16) for item in batch]
-
-#     # The rest is unchanged:
-#     phoneme_sequence = tokenizer.phoneme_to_tensor_ids(
-#         [item['phoneme_sequence'].split() for item in batch],
-#         padding_value=69
-#     )
-
-#     phoneme_durations = [
-#         torch.tensor([np.ceil(it[1]["duration_sec"]  * (1000 / 12.5)) for it in list(item['phoneme_durations'].values())] + [0]) for item in batch
-#         ]
-
-#     target_audio = pad_sequence(target_audio, batch_first=True).unsqueeze(1)   # [B, 1, T]
-#     prompt_audio = pad_sequence(prompt_audio, batch_first=True).unsqueeze(1)   # [B, 1, T]
-
-#     phoneme_sequence = pad_sequence(phoneme_sequence, batch_first=True)
-#     phoneme_durations = pad_sequence(phoneme_durations, batch_first=True)
-
-#     return {
-#         'target_audio': target_audio,
-#         'prompt_audio': prompt_audio,
-#         'phoneme_sequence': phoneme_sequence,
-#         'phoneme_durations': phoneme_durations,
-#     }
-
-
 def custom_collate_fn(batch):
     target_audio = [torch.tensor(item['target_audio'], dtype=torch.bfloat16) for item in batch]
     prompt_audio = [torch.tensor(item['prompt_audio'], dtype=torch.bfloat16) for item in batch]
@@ -87,7 +59,7 @@ def custom_collate_fn(batch):
 
     # Convert phoneme durations to tensors
     phoneme_durations = [
-        torch.tensor([np.ceil(it[1]["duration_sec"] * (1000 / 12.5)) for it in list(item['phoneme_durations'].values())] + [0], dtype=torch.bfloat16)
+        torch.tensor([np.ceil(it[1]["duration_sec"] * (1000 / 12.5)) for it in list(item['phoneme_durations'].values())], dtype=torch.bfloat16)
         for item in batch
     ]
 
@@ -98,6 +70,11 @@ def custom_collate_fn(batch):
     phoneme_sequence = pad_sequence(phoneme_sequence, batch_first=True)
     phoneme_durations = pad_sequence(phoneme_durations, batch_first=True)
 
+    if phoneme_sequence.shape[1] != phoneme_durations.shape[1]:
+        phoneme_durations_padded = torch.zeros_like(phoneme_sequence)
+        phoneme_durations_padded[:, :phoneme_durations.shape[1]] = phoneme_durations
+        phoneme_durations = phoneme_durations_padded
+        
     return {
         'target_audio': target_audio.to(dtype=torch.bfloat16),
         'prompt_audio': prompt_audio.to(dtype=torch.bfloat16),
