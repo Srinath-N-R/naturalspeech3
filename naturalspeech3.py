@@ -832,5 +832,5 @@ class NaturalSpeech3(nn.Module):
 
         overall_loss = duration_loss + prosody_loss + zp_loss + zc_loss + zd_loss + speech_loss
 
-        return {"loss": overall_loss, "duration_loss": duration_loss, "prosody_beta_loss": prosody_loss, "prosody_loss": zp_loss, "content_loss": zp_loss, "acoustic_loss": zd_loss, "speech_loss": speech_loss}
+        return {"loss": overall_loss, "duration_loss": duration_loss, "prosody_beta_loss": prosody_loss, "prosody_loss": zp_loss, "content_loss": zc_loss, "acoustic_loss": zd_loss, "speech_loss": speech_loss}
 
