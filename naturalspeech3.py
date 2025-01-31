@@ -543,7 +543,7 @@ class MainDiffusionModel(nn.Module):
     """
     def __init__(
         self,
-        output_dim=1,
+        output_dim=1024,
         prosody_vocab_size=1025,
         embed_dim=256,
         num_heads=8,
@@ -670,7 +670,7 @@ class SpeechDiffusionModel(nn.Module):
 
 def average_prosody(target_prosody, phoneme_cum_durations):
     num_phonemes = phoneme_cum_durations.shape[-1]
-    _, batch_size, _ = target_prosody.shape
+    batch_size, _ = target_prosody.shape
     averaged_prosody = torch.zeros(batch_size, num_phonemes)
     for b in range(batch_size):  # Iterate over batch
         prev_duration = 0
@@ -679,7 +679,7 @@ def average_prosody(target_prosody, phoneme_cum_durations):
                 start_idx = int(prev_duration)
                 end_idx = min(int(duration), target_prosody.shape[-1])
                 if start_idx < end_idx:
-                    averaged_prosody[b, p] = target_prosody[:, b, start_idx:end_idx].float().mean()
+                    averaged_prosody[b, p] = target_prosody[b, start_idx:end_idx].float().mean()
                 prev_duration = duration
     return averaged_prosody
 
@@ -776,41 +776,43 @@ class NaturalSpeech3(nn.Module):
         zc, zc_l = self.content_diffusion(content_tokens, cond_1=torch.cat([c_ph, zp], dim=1), cond_2=None, cond_3=None, cond_4=None,t=t)
         zd, zd_l = self.acoustic_detail_diffusion(acoustic_detail_tokens, cond_1=torch.cat([c_ph, zp, zc], dim=1), cond_2=None, cond_3=None, cond_4=None, t=t)
         speech = self.speech_diffusion(vq_tokens, cond_1=torch.cat([c_ph, zp, zc, zd], dim=1), cond_2=None, cond_3=None, cond_4=None, t=t)
-        
-        zp_l = zp_l.reshape(zc_l.size(0), original_prosody_second_dim, -1)
-        zc_l = zc_l.reshape(zc_l.size(0), original_content_second_dim, -1)
-        zd_l = zd_l.reshape(zc_l.size(0), original_acoustic_detail_second_dim, -1)
 
-        L_prompt = prompt_prosody.shape[-1]
+        zp_l = zp_l.permute(-3, -1, -2)
+        zc_l = zc_l.permute(-3, -1, -2)
+        zd_l = zd_l.permute(-3, -1, -2)
 
-        zp_l = zp_l.permute(1, 0, 2)
-        zc_l = zc_l.permute(1, 0, 2)
-        zd_l = zd_l.permute(1, 0, 2)
         speech = speech.permute(2, 0, 1)
-        
+
+        target_prosody = target_prosody.view(target_prosody.size(1), target_prosody.size(2)*target_prosody.size(0))
+        target_content = target_content.view(target_content.size(1), target_content.size(2)*target_content.size(0))
+        target_acoustic_detail = target_acoustic_detail.view(target_acoustic_detail.size(1), target_acoustic_detail.size(2)*target_acoustic_detail.size(0))
+
         padded_prosody_target = torch.full(
-            zp_l.shape,
+            (zp_l.shape[0], zp_l.shape[-1]),
             fill_value=0,
             dtype=torch.long,
             device=zp_l.device
         )
-        padded_prosody_target[:,:, L_prompt:] = target_prosody
+        L_prompt = prompt_prosody.shape[-1] * prompt_prosody.shape[0]
+        padded_prosody_target[:, L_prompt:] = target_prosody
 
         padded_content_target = torch.full(
-            zc_l.shape,
+            (zc_l.shape[0], zc_l.shape[-1]),
             fill_value=0,
             dtype=torch.long,
             device=zc_l.device
         )
-        padded_content_target[:,:, L_prompt:] = target_content
+        L_prompt = prompt_content.shape[-1] * prompt_content.shape[0]
+        padded_content_target[:, L_prompt:] = target_content
 
         padded_acoustic_detail_target = torch.full(
-            zd_l.shape,
+            (zd_l.shape[0], zd_l.shape[-1]),
             fill_value=0,
             dtype=torch.long,
             device=zd_l.device
         )
-        padded_acoustic_detail_target[:,:, L_prompt:] = target_acoustic_detail
+        L_prompt = prompt_acoustic_detail.shape[-1] * prompt_acoustic_detail.shape[0]
+        padded_acoustic_detail_target[:, L_prompt:] = target_acoustic_detail
 
         padded_vq_target = torch.full(
             speech.shape,
@@ -818,19 +820,43 @@ class NaturalSpeech3(nn.Module):
             dtype=speech.dtype,
             device=speech.device
         )
+        L_prompt = prompt_prosody.shape[-1] * prompt_prosody.shape[0]
         padded_vq_target[:,:, L_prompt:] = target_vq_post_emb
 
         phoneme_cum_durations = torch.cumsum(phoneme_durations, dim=1)
         prosody = average_prosody(target_prosody, phoneme_cum_durations).to(target_prosody.device)
         
-        duration_loss = F.l1_loss(phoneme_durations, durations_pred)
-        prosody_loss = F.l1_loss(prosody, prosody_pred.squeeze(-1))
-        zp_loss = F.l1_loss(padded_prosody_target, zp_l)
-        zc_loss = F.l1_loss(padded_content_target, zc_l)
-        zd_loss = F.l1_loss(padded_acoustic_detail_target, zd_l)
-        speech_loss = F.l1_loss(padded_vq_target, speech)
+        # duration_loss = F.l1_loss(phoneme_durations, durations_pred)
+        duration_loss = latent_loss(durations_pred, phoneme_durations)
+        # prosody_loss = F.l1_loss(prosody, prosody_pred.squeeze(-1))
+        prosody_beta_loss = latent_loss(prosody_pred.squeeze(-1), prosody)
+        # zp_loss = F.l1_loss(padded_prosody_target, zp_l)
+        prosody_loss = F.cross_entropy(zp_l, padded_prosody_target)
+        # zc_loss = F.l1_loss(padded_content_target, zc_l)
+        content_loss = F.cross_entropy(zc_l, padded_content_target)
+        # zd_loss = F.l1_loss(padded_acoustic_detail_target, zd_l)
+        acoustic_loss = F.cross_entropy(zd_l, padded_acoustic_detail_target)
+        # speech_loss = F.mse_loss(padded_vq_target, speech)
+        speech_loss = feature_matching_loss(speech, padded_vq_target)
 
-        overall_loss = duration_loss + prosody_loss + zp_loss + zc_loss + zd_loss + speech_loss
+        overall_loss = (
+            duration_loss * 1.0 +  # Log-scaled duration loss
+            prosody_beta_loss * 1.0 + # Log-scaled prosody loss
+            prosody_loss * 1.0 +  # Contrastive prosody loss
+            content_loss * 1.0 +  # InfoNCE for phoneme embeddings
+            acoustic_loss * 1.0 +  # Multi-scale latent loss
+            speech_loss * 1.0  # Feature matching loss
+        )
 
-        return {"loss": overall_loss, "duration_loss": duration_loss, "prosody_beta_loss": prosody_loss, "prosody_loss": zp_loss, "content_loss": zc_loss, "acoustic_loss": zd_loss, "speech_loss": speech_loss}
+        return {"loss": overall_loss, "duration_loss": duration_loss, "prosody_beta_loss": prosody_beta_loss, "prosody_loss": prosody_loss, "content_loss": content_loss, "acoustic_loss": acoustic_loss, "speech_loss": speech_loss}
 
+
+def feature_matching_loss(pred, target):
+    """Feature Matching Loss to compare latent features before decoding."""
+    return F.l1_loss(pred, target) + F.mse_loss(pred, target)
+
+
+def latent_loss(pred, target, epsilon=1e-5):
+    loss = F.smooth_l1_loss(pred, target)
+    weight = 1 / (torch.var(target, dim=1, keepdim=True) + epsilon).detach()
+    return (loss * weight).mean()
