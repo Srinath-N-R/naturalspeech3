@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 from naturalspeech3 import NaturalSpeech3
 from dataloader import custom_collate_fn, CustomDataset
 from Amphion.models.codec.ns3_codec import FACodecEncoder, FACodecDecoder
@@ -5,6 +8,11 @@ from huggingface_hub import hf_hub_download
 import torch
 from transformers import Trainer, TrainingArguments
 
+os.environ["TMPDIR"] = "/workspace/tmp"
+os.environ["TEMP"] = "/workspace/tmp"
+os.environ["TMP"] = "/workspace/tmp"
+tempfile.tempdir = "/workspace/tmp"
+tempfile.gettempdir()
 
 fa_encoder = FACodecEncoder(
     ngf=32,
@@ -81,7 +89,7 @@ def main():
     train_dataset = CustomDataset(dataset_folder=train_dataset_folder)
 
 
-    val_dataset_folder = "/workspace/datasets/VCTK_val/"
+    val_dataset_folder = "/workspace/datasets/VCTK_train/"
     val_dataset = CustomDataset(dataset_folder=val_dataset_folder)
 
 
