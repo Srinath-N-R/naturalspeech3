@@ -48,8 +48,9 @@ tokenizer = Tokenizer(phonemizer=PhonemizeText(), text_cleaner=clean_text)
 
 
 def custom_collate_fn(batch):
-    target_audio = [torch.tensor(item['target_audio'], dtype=torch.bfloat16) for item in batch]
-    prompt_audio = [torch.tensor(item['prompt_audio'], dtype=torch.bfloat16) for item in batch]
+    target_audio = [item['target_audio'].clone().detach().to(dtype=torch.bfloat16) for item in batch]
+    prompt_audio = [item['prompt_audio'].clone().detach().to(dtype=torch.bfloat16) for item in batch]
+
 
     # Convert phoneme sequences to tensors
     phoneme_sequence = tokenizer.phoneme_to_tensor_ids(
@@ -142,7 +143,7 @@ class CustomDataset(Dataset):
             prompt_audio = self.accumulate_prompt_audio(speaker_folder)
 
             return {
-                'target_audio': audio,
+                'target_audio': torch.tensor(audio),
                 'prompt_audio': prompt_audio,
                 'phoneme_sequence': phoneme,
                 'phoneme_durations': segment

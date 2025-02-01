@@ -595,6 +595,7 @@ class MainDiffusionModel(nn.Module):
                 c2_mask,
                 c3_mask,
                 c4_mask,
+                use_reentrant=False
             )
 
         # final output
@@ -663,6 +664,7 @@ class SpeechDiffusionModel(nn.Module):
                 c2_mask,
                 c3_mask,
                 c4_mask,
+                use_reentrant=False
             )
 
         return x
@@ -717,20 +719,21 @@ class NaturalSpeech3(nn.Module):
         target_audio: torch.tensor,
         return_loss: bool =True,
     ):
-        prompt_enc_out = self.facodec_encoder(prompt_audio.to(dtype=torch.bfloat16))
-        prompt_vq_post_emb, prompt_vq_id, *_ = self.facodec_decoder(
-            prompt_enc_out, eval_vq=True, vq=True
-        )
+        with torch.no_grad():
+            prompt_enc_out = self.facodec_encoder(prompt_audio.to(dtype=torch.bfloat16))
+            prompt_vq_post_emb, prompt_vq_id, *_ = self.facodec_decoder(
+                prompt_enc_out, eval_vq=True, vq=True
+            )
+
+            target_enc_out = self.facodec_encoder(target_audio.to(dtype=torch.bfloat16))
+            target_vq_post_emb, target_vq_id, *_ = self.facodec_decoder(
+                target_enc_out, eval_vq=True, vq=True
+            )
+
 
         prompt_prosody = prompt_vq_id[:1]
         prompt_content = prompt_vq_id[1:3]
         prompt_acoustic_detail = prompt_vq_id[3:]
-
-        target_enc_out = self.facodec_encoder(target_audio.to(dtype=torch.bfloat16))
-
-        target_vq_post_emb, target_vq_id, *_ = self.facodec_decoder(
-            target_enc_out, eval_vq=True, vq=True
-        )
 
         target_prosody = target_vq_id[:1]
         target_content = target_vq_id[1:3]
@@ -744,7 +747,7 @@ class NaturalSpeech3(nn.Module):
 
         durations_pred, prosody_pred = phoneme_prosody_duration[:,:,0], phoneme_prosody_duration[:,:,1:]
 
-        c_ph = self.length_regulator(phoneme_enc, phoneme_durations)
+        c_ph = self.length_regulator(phoneme_enc, durations_pred)
         
         partial_mask_prosody = partial_mask(target_prosody, t, mask_id=1024)
         prosody_tokens = torch.cat([partial_mask_prosody, prompt_prosody],-1)
@@ -857,6 +860,4 @@ def feature_matching_loss(pred, target):
 
 
 def latent_loss(pred, target, epsilon=1e-5):
-    loss = F.smooth_l1_loss(pred, target)
-    weight = 1 / (torch.var(target, dim=1, keepdim=True) + epsilon).detach()
-    return (loss * weight).mean()
+    return F.smooth_l1_loss(pred, target)

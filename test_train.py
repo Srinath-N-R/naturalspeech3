@@ -47,6 +47,12 @@ fa_decoder.load_state_dict(torch.load(decoder_ckpt))
 fa_encoder.eval()
 fa_decoder.eval()
 
+for p in fa_encoder.parameters():
+    p.requires_grad = False
+for p in fa_decoder.parameters():
+    p.requires_grad = False
+
+
 def compute_metrics(eval_pred, compute_result=True):
     print("DEBUG: compute_metrics function called!")  # Debugging log
     
@@ -83,6 +89,8 @@ def main():
         facodec_decoder=fa_decoder,
     ).to(device, dtype=torch.bfloat16)
 
+    # diffusion_ckpt = "/workspace/results/checkpoint-1000"
+    # diffusion.load_state_dict(torch.load(diffusion_ckpt))
 
     # Dataset
     train_dataset_folder = "/workspace/datasets/LibriTTS_R-360-Train-new/"
@@ -96,26 +104,26 @@ def main():
     training_args = TrainingArguments(
         output_dir="/workspace/results",
         logging_dir="/workspace/logs",
-        evaluation_strategy="steps",
-        gradient_accumulation_steps=16,
+        eval_strategy="steps",
+        gradient_accumulation_steps=4,
         gradient_checkpointing=False,
         bf16=True,
         fp16=False,
         num_train_epochs=100,
-        save_steps=500,
-        eval_steps=500,
+        save_steps=871,
+        eval_steps=871,
         logging_steps=10,
         dataloader_num_workers=8,
-        learning_rate=float(1e-5),
-        warmup_steps=500,
+        learning_rate=float(1e-6),
+        warmup_steps=1000,
         save_total_limit=3,
         optim="adamw_torch",
         deepspeed="/workspace/codebase/naturalspeech3/dp_config.json",
         lr_scheduler_type="cosine_with_restarts",
-        auto_find_batch_size=True,
+        per_device_train_batch_size=2,
         batch_eval_metrics=True,
         report_to="wandb",
-        run_name="natspeech3_test_26",
+        run_name="natspeech3_test_30"
     )
 
     # Initialize Trainer
@@ -129,7 +137,7 @@ def main():
     )
 
     # Train
-    trainer.train()
+    trainer.train(resume_from_checkpoint="/workspace/results/checkpoint-4356")
 
 if __name__ == '__main__':
     main()
