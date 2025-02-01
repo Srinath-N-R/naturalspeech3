@@ -711,6 +711,147 @@ class NaturalSpeech3(nn.Module):
         self.speech_diffusion = SpeechDiffusionModel()
 
 
+
+    @torch.no_grad()
+    def generate(self, phoneme_sequence, prompt_audio, num_inference_steps=50, device=None, guidance_scale=0.0):
+        """
+        Inference function for generating speech.
+        
+        Args:
+            phoneme_sequence: list or tensor of phoneme indices (shape: (S,) or (1, S))
+            prompt_audio: a tensor containing the prompt audio waveform.
+            num_inference_steps: number of reverse diffusion steps.
+            device: torch device (if None, uses the model’s device).
+            guidance_scale: if >0, applies classifier-free guidance (optional extension).
+        
+        Returns:
+            audio: the generated waveform (obtained via facodec_decoder.decode).
+        """
+        self.eval()
+        device = device or next(self.parameters()).device
+        mask_id = 1024  # define the [MASK] token ID
+
+        # ----- 1. Extract Prompt Information -----
+        prompt_audio = prompt_audio.to(device, dtype=torch.bfloat16)
+        with torch.no_grad():
+            prompt_enc_out = self.facodec_encoder(prompt_audio)
+            prompt_vq_post_emb, prompt_vq_id, *_ = self.facodec_decoder(
+                prompt_enc_out, eval_vq=True, vq=True
+            )
+        # Split the prompt tokens into branches according to training setup:
+        prompt_prosody = prompt_vq_id[:1]         # e.g., for prosody (shape: (L1, B, D))
+        prompt_content = prompt_vq_id[1:3]          # e.g., for content (shape: (L2, B, D))
+        prompt_acoustic_detail = prompt_vq_id[3:]   # e.g., for acoustic detail (shape: (L3, B, D))
+        prompt_vq_post_emb = prompt_vq_post_emb     # for final speech branch
+
+        # ----- 2. Process Phoneme Sequence and Predict Durations -----
+        if not torch.is_tensor(phoneme_sequence):
+            phoneme_sequence = torch.tensor(phoneme_sequence, device=device).unsqueeze(0)
+        else:
+            phoneme_sequence = phoneme_sequence.to(device)
+        phoneme_enc = self.phoneme_encoder(phoneme_sequence)  # (B, S, E)
+        B = phoneme_enc.size(0)
+        # Sample a time step for duration prediction:
+        t_duration = torch.randint(low=0, high=self.T, size=(B,), device=device, dtype=torch.long)
+        phoneme_prosody_duration = self.duration_prosody_predictor(phoneme_enc, t_duration)
+        # Extract predicted durations (first channel) and optionally prosody features:
+        durations_pred = phoneme_prosody_duration[:, :, 0]  # (B, S)
+        # Use predicted durations to compute frame-level condition via the length regulator:
+        c_ph = self.length_regulator(phoneme_enc, durations_pred)  # (B, L_target, E)
+        L_target = c_ph.size(1)  # target number of frames
+
+        # ----- 3. Initialize Diffusion Tokens for Each Branch -----
+        prosody_tokens = torch.full((L_target, B), mask_id, device=device, dtype=torch.long)
+        content_tokens = torch.full((L_target, B), mask_id, device=device, dtype=torch.long)
+        acoustic_tokens = torch.full((L_target, B), mask_id, device=device, dtype=torch.long)
+        vq_tokens = torch.full((L_target, B), mask_id, device=device, dtype=torch.long)
+
+        # ----- 4. Define Reverse Diffusion Schedule -----
+        T_val = self.T
+        timesteps = torch.linspace(T_val, 0, steps=num_inference_steps, device=device).long()
+        Δt = T_val / num_inference_steps  # approximate step size
+
+        # ----- 5. Reverse Diffusion Loop -----
+        for t in timesteps:
+            t_batch = torch.full((B,), t, device=device, dtype=torch.long)
+            sigma_t = sin_schedule(t.item())
+            sigma_next = sin_schedule(max(t.item() - Δt, 0))
+            num_to_mask = int(math.floor(L_target * sigma_next))
+            
+            # --- Prosody Branch ---
+            prosody_input = torch.cat([prosody_tokens, prompt_prosody.squeeze(0)], dim=0)
+            _, logits_prosody = self.prosody_diffusion(
+                prosody_input,
+                cond_1=c_ph,
+                cond_2=None,
+                cond_3=None,
+                cond_4=None,
+                t=t_batch
+            )
+            target_logits_prosody = logits_prosody[:L_target]
+            updated_prosody = remask_tokens(target_logits_prosody, prosody_tokens, mask_id, num_to_mask)
+            prosody_tokens = updated_prosody.clone()
+
+            # --- Content Branch ---
+            content_input = torch.cat([content_tokens, prompt_content.squeeze(0)], dim=0)
+            cond_content = torch.cat([c_ph, prosody_tokens.unsqueeze(0)], dim=1)
+            _, logits_content = self.content_diffusion(
+                content_input,
+                cond_1=cond_content,
+                cond_2=None,
+                cond_3=None,
+                cond_4=None,
+                t=t_batch
+            )
+            target_logits_content = logits_content[:L_target]
+            updated_content = remask_tokens(target_logits_content, content_tokens, mask_id, num_to_mask)
+            content_tokens = updated_content.clone()
+
+            # --- Acoustic Detail Branch ---
+            acoustic_input = torch.cat([acoustic_tokens, prompt_acoustic_detail.squeeze(0)], dim=0)
+            cond_acoustic = torch.cat([c_ph, prosody_tokens.unsqueeze(0), content_tokens.unsqueeze(0)], dim=1)
+            _, logits_acoustic = self.acoustic_detail_diffusion(
+                acoustic_input,
+                cond_1=cond_acoustic,
+                cond_2=None,
+                cond_3=None,
+                cond_4=None,
+                t=t_batch
+            )
+            target_logits_acoustic = logits_acoustic[:L_target]
+            updated_acoustic = remask_tokens(target_logits_acoustic, acoustic_tokens, mask_id, num_to_mask)
+            acoustic_tokens = updated_acoustic.clone()
+
+            # --- Speech (VQ) Branch ---
+            vq_input = torch.cat([vq_tokens, prompt_vq_post_emb.squeeze(0)], dim=0)
+            cond_vq = torch.cat([
+                c_ph,
+                prosody_tokens.unsqueeze(0),
+                content_tokens.unsqueeze(0),
+                acoustic_tokens.unsqueeze(0)
+            ], dim=1)
+            _, logits_vq = self.speech_diffusion(
+                vq_input,
+                cond_1=cond_vq,
+                cond_2=None,
+                cond_3=None,
+                cond_4=None,
+                t=t_batch
+            )
+            target_logits_vq = logits_vq[:L_target]
+            updated_vq = remask_tokens(target_logits_vq, vq_tokens, mask_id, num_to_mask)
+            vq_tokens = updated_vq.clone()
+
+        # ----- 6. (Optional) Classifier-Free Guidance -----
+        # If guidance_scale > 0, you can combine conditional and unconditional outputs here.
+
+        # ----- 7. Decode the Final Latent into Audio -----
+        # Here we assume that the final latent (from the speech branch) represents the desired output.
+        final_latent = vq_tokens  # shape: (L_target, B)
+        audio = self.facodec_decoder.decode(final_latent)
+        return audio
+
+
     def forward(
         self,
         phoneme_sequence: list[int],
@@ -861,3 +1002,40 @@ def feature_matching_loss(pred, target):
 
 def latent_loss(pred, target, epsilon=1e-5):
     return F.smooth_l1_loss(pred, target)
+
+
+
+def remask_tokens(predicted_logits, current_tokens, mask_id, num_to_mask):
+    """
+    Computes per-token confidence from the softmax of predicted logits.
+    For tokens that are currently masked (== mask_id), use the predicted probability;
+    for unmasked tokens, set confidence to 1.
+    Then re-mask the num_to_mask tokens (with lowest confidence) by setting them to mask_id.
+    
+    Args:
+        predicted_logits: Tensor of shape (L, B, vocab_size)
+        current_tokens: Tensor of shape (L, B)
+        mask_id: integer value for the [MASK] token
+        num_to_mask: number of tokens to re-mask per sequence
+        
+    Returns:
+        new_tokens: Tensor of shape (L, B) with updated tokens.
+    """
+    probs = F.softmax(predicted_logits, dim=-1)  # (L, B, vocab_size)
+    predicted_tokens = predicted_logits.argmax(dim=-1)  # (L, B)
+    mask = (current_tokens == mask_id)  # (L, B)
+    conf = torch.where(mask,
+                       probs.gather(dim=-1, index=predicted_tokens.unsqueeze(-1)).squeeze(-1),
+                       torch.ones_like(current_tokens, dtype=torch.float))
+    
+    L, B = current_tokens.shape
+    new_tokens = predicted_tokens.clone()
+    for b in range(B):
+        indices = (current_tokens[:, b] == mask_id).nonzero(as_tuple=False).squeeze(-1)
+        if indices.numel() > 0:
+            conf_b = conf[indices, b]
+            num_mask = min(num_to_mask, indices.numel())
+            _, sorted_idx = torch.sort(conf_b)  # ascending order: lowest confidence first
+            remask_indices = indices[sorted_idx[:num_mask]]
+            new_tokens[remask_indices, b] = mask_id
+    return new_tokens
