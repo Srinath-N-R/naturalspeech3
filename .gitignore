@@ -1,3 +1,4 @@
 wandb/
 .vscode/
 __pycache__/
+natspeech3.egg-info/
