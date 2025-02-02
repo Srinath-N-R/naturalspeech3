@@ -235,7 +235,7 @@ class PhonemeProsodyDurationDiffusion(nn.Module):
     """
     def __init__(
         self,
-        input_dim=256,     # dimension of phoneme encoder output
+        input_dim=256,
         output_dim=2,
         embed_dim=1024,
         num_heads=8,
@@ -375,14 +375,13 @@ def partial_mask(target_tokens, t, mask_id=9999):
     return masked_tokens
 
 
-def sin_schedule(step):
+def sin_schedule(step, T = 1000.0):
     """
     Example schedule: sigma(t) = sin(pi * t / (2 * T)).
     
     You can adapt this to your actual 't' range or an existing function.
     """
     # Assume 'step' is a float in [0, T], for demonstration
-    T = 1000.0  # or pass it in some other way
     fraction = step / T
     p = math.sin(math.pi * fraction / 2)
     return p
@@ -429,8 +428,6 @@ class MemoryEfficientMHA(nn.Module):
         k = k.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # scaled dot product attention (PyTorch 2.0)
-        # For memory-efficient mode, set 'is_causal=False' or so. 
         # 'attn_mask=mask' if needed, shape => [B, num_heads, S, S]
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
         # out shape: (B, num_heads, S, head_dim)
@@ -561,7 +558,7 @@ class MainDiffusionModel(nn.Module):
                 embed_dim=embed_dim,
                 num_heads=num_heads,
                 ff_dim=ff_dim,
-                conditioning_dim=embed_dim,  # time-embedding dimension
+                conditioning_dim=embed_dim,
                 dropout=dropout
             ) for _ in range(num_layers)
         ])
@@ -575,7 +572,6 @@ class MainDiffusionModel(nn.Module):
         cond_1: (B, 1, E) or (B, E) speaker style
         t: time step
         """
-        # Possibly embed t in a separate LN or an additional cross condition
         x = self.main_embedding(x_tokens)
         time_emb = self.time_embed(t)  # (B, E)
         
@@ -598,7 +594,6 @@ class MainDiffusionModel(nn.Module):
                 use_reentrant=False
             )
 
-        # final output
         logits = self.output_linear(x)
         return x, logits
 
@@ -630,7 +625,7 @@ class SpeechDiffusionModel(nn.Module):
                 embed_dim=embed_dim,
                 num_heads=num_heads,
                 ff_dim=ff_dim,
-                conditioning_dim=embed_dim,  # time-embedding dimension
+                conditioning_dim=embed_dim,
                 dropout=dropout
             ) for _ in range(num_layers)
         ])
@@ -644,8 +639,6 @@ class SpeechDiffusionModel(nn.Module):
         cond_1: (B, 1, E) or (B, E) speaker style
         t: time step
         """
-        # Possibly embed t in a separate LN or an additional cross condition
-        # x = self.main_embedding(x_tokens)
         time_emb = self.time_embed(t)  # (B, E)
         
         for layer in self.layers:
@@ -674,9 +667,9 @@ def average_prosody(target_prosody, phoneme_cum_durations):
     num_phonemes = phoneme_cum_durations.shape[-1]
     batch_size, _ = target_prosody.shape
     averaged_prosody = torch.zeros(batch_size, num_phonemes)
-    for b in range(batch_size):  # Iterate over batch
+    for b in range(batch_size):
         prev_duration = 0
-        for p in range(num_phonemes):  # Iterate over phonemes
+        for p in range(num_phonemes):
                 duration = phoneme_cum_durations[b][p]
                 start_idx = int(prev_duration)
                 end_idx = min(int(duration), target_prosody.shape[-1])
@@ -846,7 +839,6 @@ class NaturalSpeech3(nn.Module):
         # If guidance_scale > 0, you can combine conditional and unconditional outputs here.
 
         # ----- 7. Decode the Final Latent into Audio -----
-        # Here we assume that the final latent (from the speech branch) represents the desired output.
         final_latent = vq_tokens  # shape: (L_target, B)
         audio = self.facodec_decoder.decode(final_latent)
         return audio
@@ -908,10 +900,6 @@ class NaturalSpeech3(nn.Module):
         vq_tokens = torch.cat([partial_mask_vq, prompt_vq_post_emb],-1)
         vq_tokens = vq_tokens.permute(1, 2, 0)
 
-        original_prosody_second_dim = prosody_tokens.shape[-2]
-        original_content_second_dim = content_tokens.shape[-2]
-        original_acoustic_detail_second_dim = acoustic_detail_tokens.shape[-2]
-
         prosody_tokens = prosody_tokens.reshape(prosody_tokens.size(0), -1)
         content_tokens = content_tokens.reshape(content_tokens.size(0), -1)
         acoustic_detail_tokens = acoustic_detail_tokens.reshape(acoustic_detail_tokens.size(0), -1)
@@ -970,27 +958,22 @@ class NaturalSpeech3(nn.Module):
         phoneme_cum_durations = torch.cumsum(phoneme_durations, dim=1)
         prosody = average_prosody(target_prosody, phoneme_cum_durations).to(target_prosody.device)
         
-        # duration_loss = F.l1_loss(phoneme_durations, durations_pred)
         duration_loss = latent_loss(durations_pred, phoneme_durations)
-        # prosody_loss = F.l1_loss(prosody, prosody_pred.squeeze(-1))
         prosody_beta_loss = latent_loss(prosody_pred.squeeze(-1), prosody)
-        # zp_loss = F.l1_loss(padded_prosody_target, zp_l)
         prosody_loss = F.cross_entropy(zp_l, padded_prosody_target)
-        # zc_loss = F.l1_loss(padded_content_target, zc_l)
         content_loss = F.cross_entropy(zc_l, padded_content_target)
-        # zd_loss = F.l1_loss(padded_acoustic_detail_target, zd_l)
         acoustic_loss = F.cross_entropy(zd_l, padded_acoustic_detail_target)
-        # speech_loss = F.mse_loss(padded_vq_target, speech)
         speech_loss = feature_matching_loss(speech, padded_vq_target)
 
         overall_loss = (
-            duration_loss * 1.0 +  # Log-scaled duration loss
-            prosody_beta_loss * 1.0 + # Log-scaled prosody loss
-            prosody_loss * 1.0 +  # Contrastive prosody loss
-            content_loss * 1.0 +  # InfoNCE for phoneme embeddings
-            acoustic_loss * 1.0 +  # Multi-scale latent loss
-            speech_loss * 1.0  # Feature matching loss
+            duration_loss * 1.0 +
+            prosody_beta_loss * 1.0 +
+            prosody_loss * 1.0 +
+            content_loss * 1.0 +
+            acoustic_loss * 1.0 +
+            speech_loss * 1.0
         )
+
         return {"loss": overall_loss, "duration_loss": duration_loss, "prosody_beta_loss": prosody_beta_loss, "prosody_loss": prosody_loss, "content_loss": content_loss, "acoustic_loss": acoustic_loss, "speech_loss": speech_loss}
 
 
@@ -1001,7 +984,6 @@ def feature_matching_loss(pred, target):
 
 def latent_loss(pred, target, epsilon=1e-5):
     return F.smooth_l1_loss(pred, target)
-
 
 
 def remask_tokens(predicted_logits, current_tokens, mask_id, num_to_mask):
