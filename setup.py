@@ -1,0 +1,33 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="natspeech3",
+    version="0.1",
+    packages=find_packages(),
+    install_requires=[
+        "datasets",
+        "transformers",
+        "evaluate",
+        "phonemizer",
+        "librosa",
+        "torch",
+        "torchaudio",
+        'einops',
+        'ema-pytorch',
+        'indic-num2words',
+        'inflect',
+        'num2words',
+        'pyworld',
+        'pydantic',
+        'espeakng',
+        "huggingface_hub",
+        "accelerate",
+        "tqdm",
+        "pathlib",
+        "matplotlib",
+        "PyYAML",
+        "wandb",
+        "deepspeed",
+        "soundfile"
+    ]
+)

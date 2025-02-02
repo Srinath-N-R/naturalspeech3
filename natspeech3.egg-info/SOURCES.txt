@@ -1,0 +1,6 @@
+setup.py
+natspeech3.egg-info/PKG-INFO
+natspeech3.egg-info/SOURCES.txt
+natspeech3.egg-info/dependency_links.txt
+natspeech3.egg-info/requires.txt
+natspeech3.egg-info/top_level.txt
