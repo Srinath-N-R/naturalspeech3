@@ -991,7 +991,6 @@ class NaturalSpeech3(nn.Module):
             acoustic_loss * 1.0 +  # Multi-scale latent loss
             speech_loss * 1.0  # Feature matching loss
         )
-
         return {"loss": overall_loss, "duration_loss": duration_loss, "prosody_beta_loss": prosody_beta_loss, "prosody_loss": prosody_loss, "content_loss": content_loss, "acoustic_loss": acoustic_loss, "speech_loss": speech_loss}
 
 
